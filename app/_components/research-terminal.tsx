@@ -14,12 +14,26 @@ const INITIAL_SUBMIT_STATE: SubmitState = {
   errorMessage: null,
 };
 
-export function ResearchTerminal() {
+type ResearchTerminalProps = Readonly<{
+  initialCompanyName?: string;
+  initialClaim?: string;
+  isRecruiterDemo?: boolean;
+}>;
+
+const DEFAULT_COMPANY = "";
+const DEFAULT_CLAIM = "";
+
+export function ResearchTerminal({
+  initialCompanyName = DEFAULT_COMPANY,
+  initialClaim = DEFAULT_CLAIM,
+  isRecruiterDemo = false,
+}: ResearchTerminalProps) {
   const actions = useActions<AgentProviderType>();
   const [uiState, setUIState] = useUIState<AgentProviderType>();
   const [activeStreams, setActiveStreams] = useState<ResearchRunResult | null>(
     null,
   );
+  const [isInsightModalOpen, setIsInsightModalOpen] = useState(false);
 
   const applyLogUpdate = useEffectEvent((logs: readonly string[]) => {
     setUIState((current) => ({
@@ -199,9 +213,20 @@ export function ResearchTerminal() {
                 Process Log
               </h1>
             </div>
-            <p className="mt-2 text-xs text-slate-400">
-              Live CRAG telemetry from the dispatcher.
-            </p>
+            <div className="mt-2 flex items-center justify-between">
+              <p className="text-xs text-slate-400">
+                Live CRAG telemetry from the dispatcher.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsInsightModalOpen(true);
+                }}
+                className="rounded-md border border-zinc-700 px-2 py-1 text-xs font-medium text-slate-200 hover:bg-zinc-800"
+              >
+                Project Insight
+              </button>
+            </div>
           </header>
 
           <form action={formAction} className="space-y-3 border-b border-zinc-800 p-4">
@@ -210,6 +235,7 @@ export function ResearchTerminal() {
               required
               minLength={2}
               placeholder="Company name"
+              defaultValue={initialCompanyName}
               className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-slate-200 outline-none placeholder:text-slate-500 focus:border-slate-400"
             />
             <textarea
@@ -218,6 +244,7 @@ export function ResearchTerminal() {
               minLength={5}
               rows={3}
               placeholder="Claim to verify (e.g. revenue growth, market share)"
+              defaultValue={initialClaim}
               className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-slate-200 outline-none placeholder:text-slate-500 focus:border-slate-400"
             />
             <button
@@ -225,7 +252,11 @@ export function ResearchTerminal() {
               disabled={isPending}
               className="w-full rounded-md bg-slate-200 px-3 py-2 text-sm font-semibold text-zinc-900 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {isPending ? "Running Research..." : "Run Research"}
+              {isPending
+                ? "Running Research..."
+                : isRecruiterDemo
+                  ? "Run Recruiter Demo"
+                  : "Run Research"}
             </button>
             {submitState.errorMessage !== null ? (
               <p className="text-xs text-rose-400">{submitState.errorMessage}</p>
@@ -277,7 +308,7 @@ export function ResearchTerminal() {
               </p>
               <button
                 type="button"
-                className="rounded-md bg-amber-200 px-3 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-100"
+                className="rounded-md bg-orange-500 px-3 py-2 text-sm font-semibold text-white transition hover:bg-orange-400"
                 onClick={() => {
                   setUIState((current) => ({
                     ...current,
@@ -301,6 +332,41 @@ export function ResearchTerminal() {
           ) : null}
         </section>
       </div>
+      {isInsightModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-2xl rounded-xl border border-zinc-700 bg-zinc-900 p-5 text-slate-200 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="text-base font-semibold">Project Insight</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsInsightModalOpen(false);
+                }}
+                className="rounded-md border border-zinc-700 px-2 py-1 text-xs hover:bg-zinc-800"
+              >
+                Close
+              </button>
+            </div>
+            <p className="mb-3 text-sm text-slate-300">
+              Insight Stream is an AI-First multi-agent pipeline designed to deliver
+              verified intelligence with corrective retrieval loops.
+            </p>
+            <pre className="mb-3 overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-xs text-slate-300">
+{`Input
+  -> CompanySearchAgent (Tavily retrieval)
+  -> VerificationAgent (critic scoring)
+  -> CRAG Retry (if relevance < threshold)
+  -> Verified Report / Manual Override`}
+            </pre>
+            <ul className="list-disc space-y-1 pl-5 text-sm text-slate-300">
+              <li>Schema-first contracts for every agent handoff.</li>
+              <li>LangSmith-ready stage tracing in dispatcher orchestration.</li>
+              <li>Local verified-context caching with instant reload path.</li>
+              <li>Human-in-the-loop gate when CRAG retries are exhausted.</li>
+            </ul>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

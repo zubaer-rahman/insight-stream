@@ -3,6 +3,33 @@
 Insight Stream is a production-focused multi-agent research terminal for verified business intelligence.  
 It combines Tavily search, CRAG-style verification loops, and a human override fallback in a Next.js 16 + React 19 dashboard.
 
+## Quick Start for IT Magnet
+
+This project is **AI-First by design**: every workflow starts from agentic search, goes through strict verification, and then either returns a verified report or requests human override.
+
+1. Install dependencies:
+   ```bash
+   pnpm install
+   ```
+2. Configure `.env.local` (minimum):
+   ```bash
+   TAVILY_API_KEY=...
+   GROQ_API_KEY=...
+   ```
+3. Run locally:
+   ```bash
+   pnpm dev
+   ```
+4. Open:
+   - Main terminal: `http://localhost:3000`
+   - Recruiter demo route: `http://localhost:3000/demo`
+
+For deployment readiness checks, run:
+
+```bash
+pnpm deploy
+```
+
 ## Multi-Agent Architecture
 
 ### Agents

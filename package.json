@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "deploy": "pnpm lint && pnpm build"
   },
   "dependencies": {
     "@ai-sdk/groq": "^3.0.35",
