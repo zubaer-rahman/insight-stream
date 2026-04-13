@@ -36,6 +36,18 @@ export function ResearchTerminal() {
     }));
   });
 
+  const applyManualOverrideUpdate = useEffectEvent(
+    (requiresManualOverride: boolean) => {
+      setUIState((current) => ({
+        ...current,
+        requiresManualOverride,
+        manualOverrideEnabled: requiresManualOverride
+          ? current.manualOverrideEnabled
+          : false,
+      }));
+    },
+  );
+
   const [submitState, formAction, isPending] = useActionState(
     async (_previousState: SubmitState, formData: FormData) => {
       const companyNameEntry = formData.get("companyName");
@@ -58,6 +70,8 @@ export function ResearchTerminal() {
         processLog: [],
         reportMarkdown: "",
         lastScore: null,
+        requiresManualOverride: false,
+        manualOverrideEnabled: false,
       }));
 
       try {
@@ -97,6 +111,7 @@ export function ResearchTerminal() {
 
     let cancelled = false;
     let latestLogs: readonly string[] = [];
+    let latestManualOverride = false;
 
     void (async () => {
       try {
@@ -118,6 +133,16 @@ export function ResearchTerminal() {
               }
             }
           })(),
+          (async () => {
+            for await (const manualFlag of readStreamableValue(
+              activeStreams.manualOverrideStream,
+            )) {
+              if (!cancelled && manualFlag !== undefined) {
+                latestManualOverride = manualFlag;
+                applyManualOverrideUpdate(manualFlag);
+              }
+            }
+          })(),
         ]);
 
         if (cancelled) {
@@ -135,7 +160,7 @@ export function ResearchTerminal() {
 
         setUIState((current) => ({
           ...current,
-          status: "completed",
+          status: latestManualOverride ? "failed" : "completed",
           lastScore:
             scoreValue !== null && !Number.isNaN(scoreValue) ? scoreValue : null,
         }));
@@ -244,6 +269,36 @@ export function ResearchTerminal() {
               </p>
             )}
           </article>
+          {uiState.requiresManualOverride ? (
+            <div className="mt-6 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4">
+              <p className="mb-3 text-sm text-amber-200">
+                CRAG exhausted all retries. Manual guidance is required before the
+                next run.
+              </p>
+              <button
+                type="button"
+                className="rounded-md bg-amber-200 px-3 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-100"
+                onClick={() => {
+                  setUIState((current) => ({
+                    ...current,
+                    manualOverrideEnabled: true,
+                    processLog: [
+                      ...current.processLog,
+                      "🧑‍💼 Manual Override enabled. Refine claim/query and rerun.",
+                    ],
+                  }));
+                }}
+              >
+                Manual Override
+              </button>
+              {uiState.manualOverrideEnabled ? (
+                <p className="mt-2 text-xs text-amber-100">
+                  Human override enabled. Update your claim text and rerun the
+                  workflow to guide agent reasoning.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </section>
       </div>
     </div>

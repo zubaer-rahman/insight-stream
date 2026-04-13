@@ -115,6 +115,50 @@ type AIStateHandle = Readonly<{
   done: (next: ResearchDispatcherState) => void;
 }>;
 
+type TraceRecorder = Readonly<{
+  record: (stage: string, payload: unknown) => void;
+}>;
+
+async function traceAgenticWorkflow<T>(params: {
+  workflowName: string;
+  input: unknown;
+  execute: (trace: TraceRecorder) => Promise<T>;
+}): Promise<T> {
+  const langSmithEnabled =
+    process.env.LANGSMITH_API_KEY !== undefined &&
+    process.env.LANGSMITH_API_KEY.length > 0;
+  const startedAt = Date.now();
+  const prefix = `[LangSmithTrace][${params.workflowName}]`;
+
+  const trace: TraceRecorder = {
+    record(stage, payload) {
+      if (!langSmithEnabled) {
+        return;
+      }
+
+      console.info(`${prefix} ${stage}`, payload);
+    },
+  };
+
+  trace.record("Input", params.input);
+
+  try {
+    const output = await params.execute(trace);
+    trace.record("Output", {
+      status: "success",
+      elapsedMs: Date.now() - startedAt,
+    });
+    return output;
+  } catch (error) {
+    trace.record("Output", {
+      status: "error",
+      elapsedMs: Date.now() - startedAt,
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
+    throw error;
+  }
+}
+
 function createAIStateHandle(initialState: ResearchDispatcherState): AIStateHandle {
   try {
     const mutableState = getMutableAIState();
@@ -177,138 +221,163 @@ export async function researchDispatcherAction(
   "use server";
 
   const input = researchDispatcherInputSchema.parse(rawInput);
-  const requiredRuntime = getRequiredRuntime();
+  return traceAgenticWorkflow({
+    workflowName: "ResearchDispatcher",
+    input,
+    execute: async (trace) => {
+      const requiredRuntime = getRequiredRuntime();
 
-  let activeQuery = input.initialQuery ?? `${input.companyName} company profile`;
+      let activeQuery = input.initialQuery ?? `${input.companyName} company profile`;
 
-  let state: ResearchDispatcherState = {
-    status: "running",
-    companyName: input.companyName,
-    claim: input.claim,
-    currentAttempt: 0,
-    currentQuery: activeQuery,
-    minimumRelevanceScore: input.minimumRelevanceScore,
-    trace: [],
-    lastUpdatedAt: nowIso(),
-  };
-
-  const stateHandle = createAIStateHandle(state);
-  stateHandle.update(state);
-
-  let finalSearchResult: z.infer<typeof companySearchAgentOutputSchema> | undefined;
-  let finalVerificationResult:
-    | z.infer<typeof verificationAgentOutputSchema>
-    | undefined;
-
-  try {
-    for (let attempt = 1; attempt <= input.maxAttempts; attempt += 1) {
-      const searchInput = companySearchAgentInputSchema.parse({
-        companyName: input.companyName,
-        seedQuery: activeQuery,
-        maxResults: input.maxResults,
-        requireFreshSources: input.requireFreshSources,
-      });
-
-      const searchResult = companySearchAgentOutputSchema.parse(
-        await requiredRuntime.runCompanySearchAgent(searchInput),
-      );
-      finalSearchResult = searchResult;
-
-      const verificationInput = verificationAgentInputSchema.parse({
+      let state: ResearchDispatcherState = {
+        status: "running",
         companyName: input.companyName,
         claim: input.claim,
-        sources: searchResult.sources,
-        minimumRelevanceScore: input.minimumRelevanceScore,
-      });
-
-      const verificationResult = verificationAgentOutputSchema.parse(
-        await requiredRuntime.runVerificationAgent(verificationInput),
-      );
-      finalVerificationResult = verificationResult;
-
-      const assessment = verificationResult.assessment;
-      const missingInfo = deriveMissingInfo(assessment.rationale);
-      const relevanceBelowThreshold =
-        assessment.relevance_score < input.minimumRelevanceScore;
-      const shouldRetry =
-        relevanceBelowThreshold &&
-        assessment.shouldRetrySearch &&
-        attempt < input.maxAttempts;
-
-      const reformulatedQuery = shouldRetry
-        ? deriveReformulatedQuery({
-            currentQuery: activeQuery,
-            claim: input.claim,
-            missingInfo,
-            modelSuggestedQuery: assessment.reformulatedQuery,
-          })
-        : undefined;
-
-      state = researchDispatcherStateSchema.parse({
-        ...state,
-        currentAttempt: attempt,
+        currentAttempt: 0,
         currentQuery: activeQuery,
-        trace: [
-          ...state.trace,
-          {
-            attempt,
-            query: activeQuery,
-            relevanceScore: assessment.relevance_score,
-            verdict: assessment.verdict,
-            shouldRetrySearch: shouldRetry,
-            reformulatedQuery,
-            missingInfo,
-          },
-        ],
+        minimumRelevanceScore: input.minimumRelevanceScore,
+        trace: [],
         lastUpdatedAt: nowIso(),
-      });
+      };
+
+      const stateHandle = createAIStateHandle(state);
       stateHandle.update(state);
 
-      if (!shouldRetry) {
-        break;
+      let finalSearchResult: z.infer<typeof companySearchAgentOutputSchema> | undefined;
+      let finalVerificationResult:
+        | z.infer<typeof verificationAgentOutputSchema>
+        | undefined;
+
+      try {
+        for (let attempt = 1; attempt <= input.maxAttempts; attempt += 1) {
+          trace.record("Search", {
+            attempt,
+            query: activeQuery,
+          });
+
+          const searchInput = companySearchAgentInputSchema.parse({
+            companyName: input.companyName,
+            seedQuery: activeQuery,
+            maxResults: input.maxResults,
+            requireFreshSources: input.requireFreshSources,
+          });
+
+          const searchResult = companySearchAgentOutputSchema.parse(
+            await requiredRuntime.runCompanySearchAgent(searchInput),
+          );
+          finalSearchResult = searchResult;
+
+          const verificationInput = verificationAgentInputSchema.parse({
+            companyName: input.companyName,
+            claim: input.claim,
+            sources: searchResult.sources,
+            minimumRelevanceScore: input.minimumRelevanceScore,
+          });
+
+          const verificationResult = verificationAgentOutputSchema.parse(
+            await requiredRuntime.runVerificationAgent(verificationInput),
+          );
+          finalVerificationResult = verificationResult;
+
+          trace.record("Verify", {
+            attempt,
+            relevanceScore: verificationResult.assessment.relevance_score,
+            verdict: verificationResult.assessment.verdict,
+          });
+
+          const assessment = verificationResult.assessment;
+          const missingInfo = deriveMissingInfo(assessment.rationale);
+          const relevanceBelowThreshold =
+            assessment.relevance_score < input.minimumRelevanceScore;
+          const shouldRetry =
+            relevanceBelowThreshold &&
+            assessment.shouldRetrySearch &&
+            attempt < input.maxAttempts;
+
+          const reformulatedQuery = shouldRetry
+            ? deriveReformulatedQuery({
+                currentQuery: activeQuery,
+                claim: input.claim,
+                missingInfo,
+                modelSuggestedQuery: assessment.reformulatedQuery,
+              })
+            : undefined;
+
+          state = researchDispatcherStateSchema.parse({
+            ...state,
+            currentAttempt: attempt,
+            currentQuery: activeQuery,
+            trace: [
+              ...state.trace,
+              {
+                attempt,
+                query: activeQuery,
+                relevanceScore: assessment.relevance_score,
+                verdict: assessment.verdict,
+                shouldRetrySearch: shouldRetry,
+                reformulatedQuery,
+                missingInfo,
+              },
+            ],
+            lastUpdatedAt: nowIso(),
+          });
+          stateHandle.update(state);
+
+          if (!shouldRetry) {
+            break;
+          }
+
+          trace.record("Retry", {
+            attempt,
+            reformulatedQuery,
+            rationale: assessment.rationale,
+          });
+          activeQuery = reformulatedQuery ?? activeQuery;
+        }
+
+        if (finalSearchResult === undefined || finalVerificationResult === undefined) {
+          throw new Error("Dispatcher finished without agent outputs.");
+        }
+
+        const output = researchDispatcherOutputSchema.parse({
+          status: "completed",
+          attempts: state.currentAttempt,
+          minimumRelevanceScore: input.minimumRelevanceScore,
+          finalQuery: activeQuery,
+          finalSearchResult,
+          finalVerificationResult,
+          cragTrace: state.trace,
+        });
+
+        stateHandle.done(
+          researchDispatcherStateSchema.parse({
+            ...state,
+            status: "completed",
+            lastUpdatedAt: nowIso(),
+          }),
+        );
+
+        return output;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Dispatcher execution failed.";
+        trace.record("Error", {
+          message,
+        });
+
+        stateHandle.done(
+          researchDispatcherStateSchema.parse({
+            ...state,
+            status: "failed",
+            lastError: message,
+            lastUpdatedAt: nowIso(),
+          }),
+        );
+
+        throw error;
       }
-
-      activeQuery = reformulatedQuery ?? activeQuery;
-    }
-
-    if (finalSearchResult === undefined || finalVerificationResult === undefined) {
-      throw new Error("Dispatcher finished without agent outputs.");
-    }
-
-    const output = researchDispatcherOutputSchema.parse({
-      status: "completed",
-      attempts: state.currentAttempt,
-      minimumRelevanceScore: input.minimumRelevanceScore,
-      finalQuery: activeQuery,
-      finalSearchResult,
-      finalVerificationResult,
-      cragTrace: state.trace,
-    });
-
-    stateHandle.done(
-      researchDispatcherStateSchema.parse({
-        ...state,
-        status: "completed",
-        lastUpdatedAt: nowIso(),
-      }),
-    );
-
-    return output;
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Dispatcher execution failed.";
-
-    stateHandle.done(
-      researchDispatcherStateSchema.parse({
-        ...state,
-        status: "failed",
-        lastError: message,
-        lastUpdatedAt: nowIso(),
-      }),
-    );
-
-    throw error;
-  }
+    },
+  });
 }
 
 export const ResearchDispatcher = researchDispatcherAction;
