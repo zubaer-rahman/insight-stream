@@ -5,6 +5,7 @@ import { motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import { useActionState, useEffect, useEffectEvent, useState } from "react";
 import type { AgentProviderType, ResearchRunResult } from "@/lib/agents/provider";
+import { Logo } from "@/components/ui/logo";
 
 type SubmitState = Readonly<{
   errorMessage: string | null;
@@ -200,7 +201,7 @@ export function ResearchTerminal({
   return (
     <div className="flex flex-1 bg-zinc-950 text-slate-300">
       <div className="mx-auto grid w-full max-w-7xl grid-cols-1 gap-4 p-4 lg:grid-cols-[380px_1fr]">
-        <section className="flex h-[calc(100vh-2rem)] flex-col rounded-xl border border-zinc-800 bg-zinc-900/90">
+        <section className="flex h-[calc(100vh-6rem)] flex-col rounded-xl border border-zinc-800 bg-zinc-900/90">
           <header className="border-b border-zinc-800 px-4 py-4">
             <div className="flex items-center gap-3">
               <motion.div
@@ -279,7 +280,7 @@ export function ResearchTerminal({
           </div>
         </section>
 
-        <section className="h-[calc(100vh-2rem)] overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-900/90 p-6">
+        <section className="h-[calc(100vh-6rem)] overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-900/90 p-6">
           <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-3">
             <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-200">
               Verified Report
@@ -336,7 +337,10 @@ export function ResearchTerminal({
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
           <div className="w-full max-w-2xl rounded-xl border border-zinc-700 bg-zinc-900 p-5 text-slate-200 shadow-2xl">
             <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-base font-semibold">Project Insight</h3>
+              <div className="flex items-center gap-2">
+                <Logo className="h-6 w-6" />
+                <h3 className="text-base font-semibold">Project Insight</h3>
+              </div>
               <button
                 type="button"
                 onClick={() => {
