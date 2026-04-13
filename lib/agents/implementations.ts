@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { generateObject, generateText } from "ai";
 import { openai } from "@ai-sdk/openai";
+import { groq } from "@ai-sdk/groq";
 import { tavilySearch } from "@tavily/ai-sdk";
 import { tavily } from "@tavily/core";
 import {
@@ -16,12 +17,99 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function requireEnv(name: string): string {
+function readEnv(name: string): string | undefined {
   const value = process.env[name];
   if (value === undefined || value.length === 0) {
+    return undefined;
+  }
+  return value;
+}
+
+function requireEnv(name: string): string {
+  const value = readEnv(name);
+  if (value === undefined) {
     throw new Error(`Missing required environment variable: ${name}`);
   }
   return value;
+}
+
+function selectFastAnalystModel() {
+  const groqApiKey = readEnv("GROQ_API_KEY");
+  if (groqApiKey !== undefined) {
+    return groq("llama-3.3-70b-versatile");
+  }
+
+  const openAiApiKey = readEnv("OPENAI_API_KEY");
+  if (openAiApiKey !== undefined) {
+    return openai("gpt-4o-mini");
+  }
+
+  throw new Error(
+    "No inference provider configured. Set GROQ_API_KEY (preferred) or OPENAI_API_KEY.",
+  );
+}
+
+function isSparseOrGenericEvidence(
+  sources: ReadonlyArray<z.infer<typeof verificationAgentInputSchema.shape.sources.element>>,
+): boolean {
+  if (sources.length < 2) {
+    return true;
+  }
+
+  const totalSnippetChars = sources.reduce(
+    (accumulator, source) => accumulator + (source.snippet?.length ?? 0),
+    0,
+  );
+
+  const genericSourceCount = sources.filter((source) => {
+    const snippet = source.snippet?.toLowerCase() ?? "";
+    return (
+      snippet.length < 90 ||
+      snippet.includes("no snippet") ||
+      snippet.includes("summary") ||
+      snippet.includes("insufficient") ||
+      snippet.includes("generic")
+    );
+  }).length;
+
+  return totalSnippetChars < 500 || genericSourceCount >= Math.ceil(sources.length * 0.6);
+}
+
+function enforceStrictEvidenceGate(
+  assessment: z.infer<typeof verificationAssessmentSchema>,
+  verificationInput: z.infer<typeof verificationAgentInputSchema>,
+): z.infer<typeof verificationAssessmentSchema> {
+  if (!isSparseOrGenericEvidence(verificationInput.sources)) {
+    return assessment;
+  }
+
+  const forcedScore = Math.max(
+    0,
+    Math.min(assessment.relevance_score, verificationInput.minimumRelevanceScore - 0.2),
+  );
+
+  return verificationAssessmentSchema.parse({
+    ...assessment,
+    relevance_score: forcedScore,
+    verdict: "insufficient_evidence",
+    shouldRetrySearch: true,
+    reformulatedQuery:
+      assessment.reformulatedQuery ??
+      `${verificationInput.companyName} ${verificationInput.claim} primary source filings and audited metrics`,
+    rationale: `Sparse or generic evidence detected, so relevance is forced below threshold for CRAG retry. Original rationale: ${assessment.rationale}`,
+  });
+}
+
+export function resolveRuntimeProviderLabel(): string {
+  if (readEnv("GROQ_API_KEY") !== undefined) {
+    return "Groq llama-3.3-70b-versatile";
+  }
+
+  if (readEnv("OPENAI_API_KEY") !== undefined) {
+    return "OpenAI gpt-4o-mini (fallback)";
+  }
+
+  return "No model provider configured";
 }
 
 export async function runCompanySearchAgent(
@@ -95,7 +183,7 @@ ${sourceItems
   const summaryPromptWithCapability = `${summaryPrompt}\n\nSearch capability used: ${searchCapability}`;
 
   const markdownSummaryResult = await generateText({
-    model: openai("gpt-4o"),
+    model: selectFastAnalystModel(),
     temperature: 0.2,
     prompt: summaryPromptWithCapability,
   });
@@ -127,8 +215,8 @@ export async function runVerificationAgent(
 ): Promise<z.infer<typeof verificationAgentOutputSchema>> {
   const input = verificationAgentInputSchema.parse(rawInput);
 
-  const verificationPrompt = `You are a Linguistic & Business Analyst.
-Task: Evaluate how well the provided sources support the user's claim and score relevance quality.
+  const verificationPrompt = `Evaluate how well the provided Tavily sources support the user's claim and score relevance quality.
+You must be strict: weak, sparse, or generic evidence should fail relevance and trigger CRAG retry.
 
 Company: ${input.companyName}
 Claim to verify: ${input.claim}
@@ -148,19 +236,25 @@ Rules:
 - Return a relevance_score between 0 and 1.
 - If score is below threshold, set shouldRetrySearch=true.
 - Provide a reformulatedQuery targeting missing evidence when retry is needed.
-- Keep rationale concrete, citing gaps and strengths in evidence quality.`;
+- Keep rationale concrete, citing gaps and strengths in evidence quality.
+- You are evaluating Tavily search output quality directly.`;
 
   const assessmentResult = await generateObject({
-    model: openai("gpt-4o"),
+    model: selectFastAnalystModel(),
+    system: "Senior Business Analyst",
     schema: verificationAssessmentSchema,
     temperature: 0.1,
     prompt: verificationPrompt,
   });
+  const enforcedAssessment = enforceStrictEvidenceGate(
+    assessmentResult.object,
+    input,
+  );
 
   return verificationAgentOutputSchema.parse({
     claimId: input.claimId,
     claim: input.claim,
-    assessment: assessmentResult.object,
+    assessment: enforcedAssessment,
     citations: input.sources,
     validatedAt: nowIso(),
   });
@@ -169,7 +263,8 @@ Rules:
 export async function generateResearchReportMarkdown(
   output: Readonly<ResearchDispatcherOutput>,
 ): Promise<string> {
-  const reportPrompt = `You are writing a business intelligence report for executive readers.
+  const reportPrompt = `Use high-speed throughput to produce a deep, exhaustive business intelligence report.
+You are writing for executive and technical readers.
 Follow SOLID principle of data presentation:
 - Single responsibility per section
 - Open/closed structure with clear reusable headings
@@ -181,6 +276,8 @@ Required format:
 1) Clear markdown headers
 2) Bullet points for findings and risks
 3) Include a markdown table named "Tech Stack" with columns: Layer | Technology | Role
+4) Include explicit section for "CRAG Self-Correction Rationale"
+5) Include explicit section for "Actionable Next Steps"
 
 Input data:
 Final score: ${output.finalVerificationResult.assessment.relevance_score.toFixed(2)}
@@ -203,7 +300,8 @@ ${output.finalSearchResult.sources
   .join("\n")}`;
 
   const reportResult = await generateText({
-    model: openai("gpt-4o"),
+    model: selectFastAnalystModel(),
+    system: "Senior Business Analyst",
     temperature: 0.2,
     prompt: reportPrompt,
   });

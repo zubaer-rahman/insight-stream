@@ -9,6 +9,7 @@ import {
 } from "@/lib/agents/dispatcher";
 import {
   generateResearchReportMarkdown,
+  resolveRuntimeProviderLabel,
   runCompanySearchAgent,
   runVerificationAgent,
 } from "@/lib/agents/implementations";
@@ -72,6 +73,7 @@ async function runResearchTerminal(
 
   (async () => {
     try {
+      pushLog(`⚙️ Runtime Model: ${resolveRuntimeProviderLabel()}`);
       registerResearchDispatcherRuntime({
         runCompanySearchAgent: async (searchInput) => {
           pushLog(`🔍 Searching for ${searchInput.companyName}...`);
@@ -81,6 +83,7 @@ async function runResearchTerminal(
           const result = await runVerificationAgent(verificationInput);
           const score = result.assessment.relevance_score;
           pushLog(`⚖️ Verifying data relevance (Score: ${score.toFixed(2)})...`);
+          pushLog(`🧠 Rationale: ${result.assessment.rationale}`);
 
           if (result.assessment.shouldRetrySearch) {
             pushLog("🔄 CRAG Triggered: Reformulating query...");
