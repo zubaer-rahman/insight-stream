@@ -3,7 +3,7 @@
 import { readStreamableValue, useActions, useUIState } from "@ai-sdk/rsc";
 import { motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
-import { useActionState, useEffect, useEffectEvent, useState } from "react";
+import { useActionState, useEffect, useEffectEvent, useRef, useState } from "react";
 import type { AgentProviderType, ResearchRunResult } from "@/lib/agents/provider";
 import { Logo } from "@/components/ui/logo";
 
@@ -14,6 +14,30 @@ type SubmitState = Readonly<{
 const INITIAL_SUBMIT_STATE: SubmitState = {
   errorMessage: null,
 };
+
+const LOCAL_REPORT_STORAGE_KEY = "insight-stream:last-verified-report";
+const MIN_CLAIM_LENGTH = 12;
+
+const QUICK_START_CARDS = [
+  {
+    title: "Analyze Apple's M4 Chipset",
+    companyName: "Apple Inc.",
+    claim:
+      "Evaluate Apple Inc. M4 chipset supply chain concentration and potential launch risk for enterprise rollout.",
+  },
+  {
+    title: "Nvidia Blackwell Infrastructure",
+    companyName: "NVIDIA",
+    claim:
+      "Assess NVIDIA Blackwell infrastructure readiness, hyperscaler adoption signals, and near-term execution bottlenecks.",
+  },
+  {
+    title: "Tesla AI Infrastructure",
+    companyName: "Tesla",
+    claim:
+      "Evaluate Tesla AI infrastructure capacity trajectory and data-center dependency risk over the next four quarters.",
+  },
+] as const;
 
 type ResearchTerminalProps = Readonly<{
   initialCompanyName?: string;
@@ -35,6 +59,7 @@ export function ResearchTerminal({
     null,
   );
   const [isInsightModalOpen, setIsInsightModalOpen] = useState(false);
+  const formRef = useRef<HTMLFormElement | null>(null);
 
   const applyLogUpdate = useEffectEvent((logs: readonly string[]) => {
     setUIState((current) => ({
@@ -72,10 +97,16 @@ export function ResearchTerminal({
         typeof companyNameEntry === "string" ? companyNameEntry.trim() : "";
       const claim = typeof claimEntry === "string" ? claimEntry.trim() : "";
 
-      if (companyName.length < 2 || claim.length < 5) {
+      if (companyName.length < 2 || claim.length < MIN_CLAIM_LENGTH) {
         return {
           errorMessage:
-            "Please provide a valid company name and a claim with enough detail.",
+            `Please provide a valid company name and a claim with at least ${MIN_CLAIM_LENGTH} characters.`,
+        };
+      }
+      if (companyName.toLowerCase() === "apple") {
+        return {
+          errorMessage:
+            "Query is too broad. Try a specific prompt like: Apple Inc. Vision Pro supply chain.",
         };
       }
 
@@ -118,6 +149,63 @@ export function ResearchTerminal({
     },
     INITIAL_SUBMIT_STATE,
   );
+
+  useEffect(() => {
+    try {
+      const persisted = localStorage.getItem(LOCAL_REPORT_STORAGE_KEY);
+      if (persisted === null) {
+        return;
+      }
+
+      const parsed: unknown = JSON.parse(persisted);
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        !("reportMarkdown" in parsed) ||
+        !("lastScore" in parsed)
+      ) {
+        return;
+      }
+
+      const reportMarkdown = (parsed as { reportMarkdown?: unknown }).reportMarkdown;
+      const lastScore = (parsed as { lastScore?: unknown }).lastScore;
+      if (typeof reportMarkdown !== "string") {
+        return;
+      }
+
+      setUIState((current) => {
+        if (current.reportMarkdown.length > 0) {
+          return current;
+        }
+        return {
+          ...current,
+          status: "completed",
+          reportMarkdown,
+          lastScore: typeof lastScore === "number" ? lastScore : null,
+          processLog:
+            current.processLog.length > 0
+              ? current.processLog
+              : ["✅ Restored last verified report from local storage."],
+        };
+      });
+    } catch {
+      // Ignore malformed local storage payloads.
+    }
+  }, [setUIState]);
+
+  useEffect(() => {
+    if (uiState.status !== "completed" || uiState.reportMarkdown.trim().length === 0) {
+      return;
+    }
+
+    localStorage.setItem(
+      LOCAL_REPORT_STORAGE_KEY,
+      JSON.stringify({
+        reportMarkdown: uiState.reportMarkdown,
+        lastScore: uiState.lastScore,
+      }),
+    );
+  }, [uiState.status, uiState.reportMarkdown, uiState.lastScore]);
 
   useEffect(() => {
     if (activeStreams === null) {
@@ -198,6 +286,36 @@ export function ResearchTerminal({
     };
   }, [activeStreams, setUIState]);
 
+  const showWaitingState =
+    uiState.status === "idle" &&
+    uiState.reportMarkdown.length === 0 &&
+    !isPending &&
+    activeStreams === null;
+  const showSkeletonLoader =
+    uiState.status === "running" && uiState.reportMarkdown.length === 0;
+  const isDevelopment = process.env.NODE_ENV === "development";
+  const traceUrl =
+    process.env.NEXT_PUBLIC_LANGSMITH_PROJECT_URL ?? "https://smith.langchain.com/";
+
+  const applyQuickStart = (card: (typeof QUICK_START_CARDS)[number]): void => {
+    const formElement = formRef.current;
+    if (formElement === null) {
+      return;
+    }
+
+    const companyInput = formElement.elements.namedItem(
+      "companyName",
+    ) as HTMLInputElement | null;
+    const claimInput = formElement.elements.namedItem("claim") as HTMLTextAreaElement | null;
+
+    if (companyInput !== null) {
+      companyInput.value = card.companyName;
+    }
+    if (claimInput !== null) {
+      claimInput.value = card.claim;
+    }
+  };
+
   return (
     <div className="flex flex-1 bg-zinc-950 text-slate-300">
       <div className="mx-auto grid w-full max-w-7xl grid-cols-1 gap-4 p-4 lg:grid-cols-[380px_1fr]">
@@ -230,7 +348,11 @@ export function ResearchTerminal({
             </div>
           </header>
 
-          <form action={formAction} className="space-y-3 border-b border-zinc-800 p-4">
+          <form
+            ref={formRef}
+            action={formAction}
+            className="space-y-3 border-b border-zinc-800 p-4"
+          >
             <input
               name="companyName"
               required
@@ -277,6 +399,16 @@ export function ResearchTerminal({
                 </div>
               ))
             )}
+            {isDevelopment ? (
+              <a
+                href={traceUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-block pt-2 text-xs text-slate-500 underline decoration-slate-700 underline-offset-2 hover:text-slate-300"
+              >
+                View LangSmith Trace
+              </a>
+            ) : null}
           </div>
         </section>
 
@@ -295,6 +427,44 @@ export function ResearchTerminal({
           <article className="prose prose-invert prose-slate max-w-none prose-headings:text-slate-100 prose-p:text-slate-300 prose-strong:text-slate-100 prose-li:text-slate-300">
             {uiState.reportMarkdown.length > 0 ? (
               <ReactMarkdown>{uiState.reportMarkdown}</ReactMarkdown>
+            ) : showSkeletonLoader ? (
+              <div className="space-y-3">
+                <div className="h-4 w-2/3 animate-pulse rounded bg-zinc-800" />
+                <div className="h-3 w-full animate-pulse rounded bg-zinc-800" />
+                <div className="h-3 w-11/12 animate-pulse rounded bg-zinc-800" />
+                <div className="h-3 w-10/12 animate-pulse rounded bg-zinc-800" />
+                <div className="h-4 w-1/2 animate-pulse rounded bg-zinc-800" />
+                <div className="h-3 w-full animate-pulse rounded bg-zinc-800" />
+                <div className="h-3 w-9/12 animate-pulse rounded bg-zinc-800" />
+              </div>
+            ) : showWaitingState ? (
+              <div className="space-y-4">
+                <div className="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+                  <Logo className="h-8 w-8" />
+                  <div>
+                    <p className="text-sm font-medium text-slate-100">
+                      Waiting for Input
+                    </p>
+                    <p className="text-xs text-slate-400">
+                      Start with a focused claim to get better CRAG precision.
+                    </p>
+                  </div>
+                </div>
+                <div className="grid gap-2">
+                  {QUICK_START_CARDS.map((card) => (
+                    <button
+                      key={card.title}
+                      type="button"
+                      className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-left text-sm text-slate-300 transition hover:border-zinc-700 hover:bg-zinc-900"
+                      onClick={() => {
+                        applyQuickStart(card);
+                      }}
+                    >
+                      {card.title}
+                    </button>
+                  ))}
+                </div>
+              </div>
             ) : (
               <p className="text-slate-500">
                 Verified markdown report will appear after dispatcher completion.

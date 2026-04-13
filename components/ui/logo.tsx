@@ -36,20 +36,12 @@ export function Logo({
         strokeWidth="3.5"
       />
       <path
-        d="M21 23 L33 32 L21 41"
+        d="M41 18 C33 18 27 22 27 27 C27 31 30 34 37 36 C42 37 45 39 45 42 C45 46 40 48 33 48 C27 48 22 46 19 43"
         fill="none"
         stroke="url(#insight-stream-gradient)"
         strokeLinecap="round"
         strokeLinejoin="round"
-        strokeWidth="4.5"
-      />
-      <path
-        d="M43 23 L31 32 L43 41"
-        fill="none"
-        stroke="url(#insight-stream-gradient)"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="4.5"
+        strokeWidth="5"
       />
     </svg>
   );
