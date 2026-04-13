@@ -49,6 +49,34 @@ function selectFastAnalystModel() {
   );
 }
 
+function isJsonSchemaUnsupportedError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("json_schema") ||
+    message.includes("response_format") ||
+    message.includes("invalid schema for response_format")
+  );
+}
+
+function extractJsonObject(rawText: string): string {
+  const fencedMatch = rawText.match(/```json\s*([\s\S]*?)```/i);
+  if (fencedMatch?.[1] !== undefined) {
+    return fencedMatch[1].trim();
+  }
+
+  const objectStart = rawText.indexOf("{");
+  const objectEnd = rawText.lastIndexOf("}");
+  if (objectStart >= 0 && objectEnd > objectStart) {
+    return rawText.slice(objectStart, objectEnd + 1);
+  }
+
+  return rawText.trim();
+}
+
 function isSparseOrGenericEvidence(
   sources: ReadonlyArray<z.infer<typeof verificationAgentInputSchema.shape.sources.element>>,
 ): boolean {
@@ -97,6 +125,118 @@ function enforceStrictEvidenceGate(
       assessment.reformulatedQuery ??
       `${verificationInput.companyName} ${verificationInput.claim} primary source filings and audited metrics`,
     rationale: `Sparse or generic evidence detected, so relevance is forced below threshold for CRAG retry. Original rationale: ${assessment.rationale}`,
+  });
+}
+
+const verdictOptions = [
+  "verified",
+  "partially_verified",
+  "not_verified",
+  "insufficient_evidence",
+] as const;
+
+function clampScore(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function toNumber(value: unknown, fallback: number): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return fallback;
+}
+
+function normalizeVerdict(rawVerdict: unknown, relevanceScore: number) {
+  if (typeof rawVerdict === "string") {
+    const normalized = rawVerdict.trim().toLowerCase().replaceAll(" ", "_");
+    if ((verdictOptions as readonly string[]).includes(normalized)) {
+      return normalized as (typeof verdictOptions)[number];
+    }
+
+    if (normalized.includes("insufficient")) {
+      return "insufficient_evidence";
+    }
+    if (normalized.includes("partial")) {
+      return "partially_verified";
+    }
+    if (normalized.includes("not")) {
+      return "not_verified";
+    }
+    if (normalized.includes("verify")) {
+      return "verified";
+    }
+  }
+
+  if (relevanceScore >= 0.85) {
+    return "verified";
+  }
+  if (relevanceScore >= 0.65) {
+    return "partially_verified";
+  }
+  if (relevanceScore >= 0.45) {
+    return "not_verified";
+  }
+  return "insufficient_evidence";
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function normalizeAssessmentCandidate(
+  candidate: unknown,
+  verificationInput: z.infer<typeof verificationAgentInputSchema>,
+): z.infer<typeof verificationAssessmentSchema> {
+  const sourceIds = verificationInput.sources.map((source) => source.id);
+  const baseSourceIds = sourceIds.length > 0 ? sourceIds : ["fallback-source-id"];
+  const asRecord =
+    typeof candidate === "object" && candidate !== null
+      ? (candidate as Record<string, unknown>)
+      : {};
+
+  const relevanceScore = clampScore(
+    toNumber(asRecord.relevance_score, verificationInput.minimumRelevanceScore),
+  );
+  const supportingSourceIds = normalizeStringArray(asRecord.supportingSourceIds);
+  const conflictingSourceIds = normalizeStringArray(asRecord.conflictingSourceIds);
+  const rationale =
+    typeof asRecord.rationale === "string" && asRecord.rationale.trim().length > 0
+      ? asRecord.rationale.trim()
+      : "Assessment generated with normalized fallback due malformed model output.";
+  const reformulatedQuery =
+    typeof asRecord.reformulatedQuery === "string" &&
+    asRecord.reformulatedQuery.trim().length > 0
+      ? asRecord.reformulatedQuery.trim()
+      : undefined;
+  const shouldRetrySearch =
+    typeof asRecord.shouldRetrySearch === "boolean"
+      ? asRecord.shouldRetrySearch
+      : relevanceScore < verificationInput.minimumRelevanceScore;
+
+  return verificationAssessmentSchema.parse({
+    relevance_score: relevanceScore,
+    verdict: normalizeVerdict(asRecord.verdict, relevanceScore),
+    rationale,
+    supportingSourceIds:
+      supportingSourceIds.length > 0 ? supportingSourceIds : [baseSourceIds[0]],
+    conflictingSourceIds,
+    reformulatedQuery,
+    shouldRetrySearch,
   });
 }
 
@@ -237,17 +377,64 @@ Rules:
 - If score is below threshold, set shouldRetrySearch=true.
 - Provide a reformulatedQuery targeting missing evidence when retry is needed.
 - Keep rationale concrete, citing gaps and strengths in evidence quality.
-- You are evaluating Tavily search output quality directly.`;
+- You are evaluating Tavily search output quality directly.
+- Return ONLY the schema fields and no extra keys.`;
 
-  const assessmentResult = await generateObject({
-    model: selectFastAnalystModel(),
-    system: "Senior Business Analyst",
-    schema: verificationAssessmentSchema,
-    temperature: 0.1,
-    prompt: verificationPrompt,
-  });
+  let assessment = undefined as z.infer<typeof verificationAssessmentSchema> | undefined;
+
+  try {
+    const assessmentResult = await generateObject({
+      model: selectFastAnalystModel(),
+      system: "Senior Business Analyst",
+      schema: verificationAssessmentSchema,
+      temperature: 0.1,
+      prompt: verificationPrompt,
+    });
+    assessment = normalizeAssessmentCandidate(assessmentResult.object, input);
+  } catch (error) {
+    if (!isJsonSchemaUnsupportedError(error)) {
+      throw error;
+    }
+
+    const openAiApiKey = readEnv("OPENAI_API_KEY");
+    if (openAiApiKey !== undefined) {
+      try {
+        const fallbackObjectResult = await generateObject({
+          model: openai("gpt-4o-mini"),
+          system: "Senior Business Analyst",
+          schema: verificationAssessmentSchema,
+          temperature: 0.1,
+          prompt: verificationPrompt,
+        });
+        assessment = normalizeAssessmentCandidate(fallbackObjectResult.object, input);
+      } catch (fallbackError) {
+        if (!isJsonSchemaUnsupportedError(fallbackError)) {
+          throw fallbackError;
+        }
+      }
+    } else {
+      assessment = undefined;
+    }
+
+    if (assessment === undefined) {
+      const fallbackTextResult = await generateText({
+        model: selectFastAnalystModel(),
+        system: "Senior Business Analyst",
+        temperature: 0.1,
+        prompt: `${verificationPrompt}\nReturn a single JSON object only.`,
+      });
+
+      const jsonPayload = extractJsonObject(fallbackTextResult.text);
+      assessment = normalizeAssessmentCandidate(JSON.parse(jsonPayload), input);
+    }
+  }
+
+  if (assessment === undefined) {
+    throw new Error("Verification assessment could not be generated.");
+  }
+
   const enforcedAssessment = enforceStrictEvidenceGate(
-    assessmentResult.object,
+    assessment,
     input,
   );
 

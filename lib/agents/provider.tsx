@@ -29,10 +29,6 @@ type RunResearchResult = Readonly<{
 }>;
 export type ResearchRunResult = RunResearchResult;
 
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
 function toInitialAIState(): ResearchDispatcherState {
   return researchDispatcherStateSchema.parse({
     status: "idle",
@@ -42,7 +38,7 @@ function toInitialAIState(): ResearchDispatcherState {
     currentQuery: "initial query",
     minimumRelevanceScore: 0.8,
     trace: [],
-    lastUpdatedAt: nowIso(),
+    lastUpdatedAt: "1970-01-01T00:00:00.000Z",
   });
 }
 
